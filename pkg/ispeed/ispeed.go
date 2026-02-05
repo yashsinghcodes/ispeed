@@ -64,6 +64,25 @@ func normalizeClientConfig(cfg ClientConfig) ClientConfig {
 	return cfg
 }
 
+func reportProgress(cfg ClientConfig, phase string, percent float64, mbps float64, pingMs float64) {
+	if cfg.Progress == nil {
+		return
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	if mbps < 0 {
+		mbps = 0
+	}
+	if pingMs < 0 {
+		pingMs = 0
+	}
+	cfg.Progress(ProgressUpdate{Phase: phase, Percent: percent, Mbps: mbps, PingMs: pingMs})
+}
+
 func runPing(client *http.Client, cfg ClientConfig) (PingMetrics, error) {
 	results := make([]time.Duration, 0, cfg.PingCount)
 	url := cfg.BaseURL + "/ping"
@@ -78,6 +97,7 @@ func runPing(client *http.Client, cfg ClientConfig) (PingMetrics, error) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 		results = append(results, time.Since(start))
+		reportProgress(cfg, "ping", float64(i+1)/float64(cfg.PingCount)*100, 0, float64(time.Since(start).Milliseconds()))
 		if i < cfg.PingCount-1 {
 			time.Sleep(150 * time.Millisecond)
 		}
@@ -116,6 +136,26 @@ func runDownload(client *http.Client, cfg ClientConfig) (SpeedMetrics, error) {
 	start := time.Now()
 
 	perStreamBytes := int64(cfg.DownloadMB) * 1024 * 1024
+	targetBytes := perStreamBytes * int64(cfg.Streams)
+	var progressDone chan struct{}
+	if cfg.Progress != nil {
+		progressDone = make(chan struct{})
+		progressStart := start
+		go func() {
+			ticker := time.NewTicker(200 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-progressDone:
+					return
+				case <-ticker.C:
+					current := atomic.LoadInt64(&totalBytes)
+					elapsed := time.Since(progressStart)
+					reportProgress(cfg, "download", percentDone(current, targetBytes), bytesToMbps(current, elapsed), 0)
+				}
+			}
+		}()
+	}
 
 	for i := 0; i < cfg.Streams; i++ {
 		wg.Go(func() {
@@ -152,6 +192,13 @@ func runDownload(client *http.Client, cfg ClientConfig) (SpeedMetrics, error) {
 	wg.Wait()
 	elapsed := time.Since(start)
 
+	if cfg.Progress != nil {
+		if progressDone != nil {
+			close(progressDone)
+		}
+		reportProgress(cfg, "download", 100, bytesToMbps(totalBytes, elapsed), 0)
+	}
+
 	if runErr != nil {
 		return SpeedMetrics{}, runErr
 	}
@@ -174,12 +221,33 @@ func runUpload(client *http.Client, cfg ClientConfig) (SpeedMetrics, error) {
 	wg := sync.WaitGroup{}
 	start := time.Now()
 
+	var progressDone chan struct{}
+	if cfg.Progress != nil {
+		progressDone = make(chan struct{})
+		progressStart := start
+		go func() {
+			ticker := time.NewTicker(200 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-progressDone:
+					return
+				case <-ticker.C:
+					current := atomic.LoadInt64(&totalBytes)
+					elapsed := time.Since(progressStart)
+					reportProgress(cfg, "upload", percentElapsed(elapsed, cfg.Duration), bytesToMbps(current, elapsed), 0)
+
+				}
+			}
+		}()
+	}
+
 	for i := 0; i < cfg.Streams; i++ {
 		wg.Go(func() {
 			uploadCtx, cancelUpload := context.WithTimeout(ctx, cfg.Duration)
 			defer cancelUpload()
 
-			reader := &timedReader{ctx: uploadCtx, chunkSize: cfg.ChunkSize}
+			reader := &timedReader{ctx: uploadCtx, chunkSize: cfg.ChunkSize, total: &totalBytes}
 			req, err := http.NewRequestWithContext(uploadCtx, http.MethodPost, cfg.BaseURL+"/upload", reader)
 			if err != nil {
 				setRunErr(&errOnce, &runErr, err)
@@ -189,7 +257,6 @@ func runUpload(client *http.Client, cfg ClientConfig) (SpeedMetrics, error) {
 			resp, err := client.Do(req)
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-					atomic.AddInt64(&totalBytes, reader.bytes())
 					return
 				}
 				setRunErr(&errOnce, &runErr, err)
@@ -197,12 +264,18 @@ func runUpload(client *http.Client, cfg ClientConfig) (SpeedMetrics, error) {
 			}
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
-			atomic.AddInt64(&totalBytes, reader.bytes())
 		})
 	}
 
 	wg.Wait()
 	elapsed := time.Since(start)
+
+	if cfg.Progress != nil {
+		if progressDone != nil {
+			close(progressDone)
+		}
+		reportProgress(cfg, "upload", 100, bytesToMbps(totalBytes, elapsed), 0)
+	}
 
 	if runErr != nil {
 		return SpeedMetrics{}, runErr
@@ -254,10 +327,39 @@ func bytesToMbps(bytes int64, duration time.Duration) float64 {
 	return bits / duration.Seconds() / 1_000_000
 }
 
+func percentDone(current int64, total int64) float64 {
+	if total <= 0 {
+		return 0
+	}
+	percent := (float64(current) / float64(total)) * 100
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
+}
+
+func percentElapsed(elapsed time.Duration, target time.Duration) float64 {
+	if target <= 0 {
+		return 0
+	}
+	percent := (elapsed.Seconds() / target.Seconds()) * 100
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
+}
+
 type timedReader struct {
 	ctx       context.Context
 	chunkSize int
 	count     int64
+	total     *int64
 }
 
 func (t *timedReader) Read(p []byte) (int, error) {
@@ -273,7 +375,11 @@ func (t *timedReader) Read(p []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	atomic.AddInt64(&t.count, int64(len(p)))
+	bytesRead := int64(len(p))
+	atomic.AddInt64(&t.count, bytesRead)
+	if t.total != nil {
+		atomic.AddInt64(t.total, bytesRead)
+	}
 	return len(p), nil
 }
 

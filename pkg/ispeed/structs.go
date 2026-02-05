@@ -4,13 +4,13 @@ import "time"
 
 const (
 	DefaultServerAddr = ":8080"
-	DefaultClientBase = "http://localhost:8080"
+	DefaultClientBase = "https://speed.getanswers.pro"
 	DefaultDuration   = 12 * time.Second
-	DefaultStreams    = 4
+	DefaultStreams    = 1
 	DefaultChunkSize  = 64 * 1024
-	DefaultDownloadMB = 50
+	DefaultDownloadMB = 40
 	DefaultPingCount  = 6
-	DefaultTimeout    = 5 * time.Second
+	DefaultTimeout    = 30 * time.Second
 	DefaultMaxBytes   = int64(1024 * 1024 * 1024)
 	DefaultReadLimit  = int64(512 * 1024 * 1024)
 )
@@ -30,6 +30,14 @@ type ClientConfig struct {
 	PingCount  int
 	Timeout    time.Duration
 	JSON       bool
+	Progress   func(ProgressUpdate)
+}
+
+type ProgressUpdate struct {
+	Phase   string
+	Percent float64
+	Mbps    float64
+	PingMs  float64
 }
 
 type PingMetrics struct {

@@ -1,3 +1,4 @@
+const DEFAULT_PORT = 8080;
 const DEFAULT_MAX_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_READ_LIMIT = 512 * 1024 * 1024;
 const DEFAULT_CHUNK_SIZE = 64 * 1024;
@@ -8,7 +9,7 @@ function parseSizeParam(request: Request, maxBytes: number): number {
   if (!sizeParam) {
     return maxBytes;
   }
-  const parsed: number = Number.parseInt(sizeParam, 10);
+  const parsed = Number.parseInt(sizeParam, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return maxBytes;
   }
@@ -83,7 +84,7 @@ async function handler(request: Request): Promise<Response> {
   return new Response("not found", { status: 404, headers: { "Content-Type": "text/plain" } });
 }
 
-const worker: ExportedHandler = {
+const worker = {
   fetch: handler,
 };
 
