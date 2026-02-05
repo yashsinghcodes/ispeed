@@ -1,0 +1,3 @@
+name = "ispeed-server"
+main = "index.ts"
+compatibility_date = "2026-02-05"
