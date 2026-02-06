@@ -3,14 +3,19 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/yashsinghcodes/ispeed/pkg/ispeed"
+	"gopkg.in/yaml.v3"
 )
 
 type progressMsg struct {
@@ -28,6 +33,15 @@ type errMsg struct {
 type progressState struct {
 	percent float64
 	mbps    float64
+}
+
+type serverList struct {
+	Servers []serverEntry `yaml:"servers"`
+}
+
+type serverEntry struct {
+	Name string `yaml:"name"`
+	URL  string `yaml:"url"`
 }
 
 type model struct {
@@ -142,8 +156,95 @@ func renderSpeedLine(label string, mbps float64) string {
 	return fmt.Sprintf("%-8s %s", labelStyle.Render(label), valueStyle.Render(fmt.Sprintf("%6.2f Mbps", mbps)))
 }
 
+func configPath() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(homeDir, ".ispeed.yaml"), nil
+}
+
+func loadServerList() (serverList, error) {
+	path, err := configPath()
+	if err != nil {
+		return serverList{}, err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("[ERROR] Failed to read config file at ~/.ispeed.yaml")
+		data = []byte(defaultConfig())
+	}
+
+	var list serverList
+	if err := yaml.Unmarshal(data, &list); err != nil {
+		return serverList{}, err
+	}
+
+	return list, nil
+}
+
+func defaultConfig() (string) {
+	return "servers:\n  - name: Default\n    url: https://speed.getanswers.pro\n"
+}
+
+func pickFastestServer() (string, error) {
+	list, err := loadServerList()
+	if err != nil {
+		return "", fmt.Errorf("read server list: %w", err)
+	}
+
+	if len(list.Servers) == 0 {
+		return "", fmt.Errorf("no servers defined in config")
+	}
+
+	client := &http.Client{Timeout: 4 * time.Second}
+	bestURL := ""
+	bestLatency := time.Duration(1<<63 - 1)
+
+	for _, server := range list.Servers {
+		if server.URL == "" {
+			continue
+		}
+		start := time.Now()
+		resp, err := client.Get(strings.TrimRight(server.URL, "/") + "/ping")
+		if err != nil {
+			continue
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		elapsed := time.Since(start)
+		if elapsed < bestLatency {
+			bestLatency = elapsed
+			bestURL = strings.TrimRight(server.URL, "/")
+		}
+	}
+
+	if bestURL == "" {
+		return "", fmt.Errorf("no reachable servers found")
+	}
+
+	return bestURL, nil
+}
+
+
 func main() {
+	f, err := os.OpenFile("/tmp/ispeed.log", os.O_CREATE | os.O_RDWR, os.ModeTemporary)
+	if err != nil {
+	}
+
+	log.SetOutput(f)
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
 	cfg := parseFlags()
+
+	if cfg.BaseURL == "" {
+		selected, err := pickFastestServer()
+		if err != nil {
+			log.Fatalf("[ERROR] failed to select server: %v", err)
+		}
+		cfg.BaseURL = selected
+	}
 
 	if cfg.JSON {
 		result, err := ispeed.RunClient(cfg)
@@ -196,7 +297,7 @@ func main() {
 }
 
 func parseFlags() ispeed.ClientConfig {
-	baseURL := flag.String("url", ispeed.DefaultClientBase, "base URL for server")
+	baseURL := flag.String("url", "", "base URL for server (leave empty for auto-select)")
 	duration := flag.Duration("duration", ispeed.DefaultDuration, "test duration")
 	streams := flag.Int("streams", ispeed.DefaultStreams, "parallel streams")
 	chunkSize := flag.Int("chunk-size", ispeed.DefaultChunkSize, "chunk size in bytes")
