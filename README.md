@@ -43,6 +43,8 @@ Options:
 
 The server is a single TypeScript entrypoint that runs on both Bun and Cloudflare Workers.
 
+If you can host a public server, please do. More community-hosted servers improve accuracy, and we will add them to the shared list. Create an issue with your server URL and location so we can include it.
+
 ### Run locally (Bun)
 
 ```
